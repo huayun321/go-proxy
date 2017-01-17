@@ -9,7 +9,17 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
 )
+
+//connection pool
+type Backend struct {
+	net.Conn
+	Reader *bufio.Reader
+	Writer *bufio.Writer
+}
+
+var backendQueue chan *Backend
 
 //statistics
 var requestBytes map[string]int64
@@ -17,6 +27,34 @@ var requestLock sync.Mutex
 
 func init() {
 	requestBytes = make(map[string]int64)
+	backendQueue = make(chan *Backend, 10)
+}
+
+func getBackend() (*Backend, error) {
+	select {
+	case be := <-backendQueue:
+		return be, nil
+	case <-time.After(100 * time.Millisecond):
+		be, err := net.Dial("tcp", "127.0.0.1:8081")
+		if err != nil {
+			return nil, err
+		}
+
+		return &Backend{
+			Conn:   be,
+			Reader: bufio.NewReader(be),
+			Writer: bufio.NewWriter(be),
+		}, nil
+	}
+}
+
+func queueBackend(be *Backend) {
+	select {
+	case backendQueue <- be:
+		// Backend re-enqueued safely, move on.
+	case <-time.After(1 * time.Second):
+		be.Close()
+	}
 }
 
 func updateStats(req *http.Request, resp *http.Response) int64 {
@@ -62,22 +100,25 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 
-		if be, err := net.Dial("tcp", "127.0.0.1:8081"); err == nil {
-			be_reader := bufio.NewReader(be)
+		be, err := getBackend()
+		if err != nil {
+			return
+		}
 
-			if err := req.Write(be); err == nil {
+		if err := req.Write(be.Writer); err == nil {
+			be.Writer.Flush()
+			//6. Read the response from the backend
+			if resp, err := http.ReadResponse(be.Reader, req); err == nil {
+				bytes := updateStats(req, resp)
+				resp.Header.Set("X-Bytes", strconv.FormatInt(bytes, 10))
 
-				//6. Read the response from the backend
-				if resp, err := http.ReadResponse(be_reader, req); err == nil {
-					bytes := updateStats(req, resp)
-					resp.Header.Set("X-Bytes", strconv.FormatInt(bytes, 10))
-
-					if err := resp.Write(conn); err == nil {
-						log.Printf("%s: %d", req.URL.Path, resp.StatusCode)
-					}
-
+				if err := resp.Write(conn); err == nil {
+					log.Printf("%s: %d", req.URL.Path, resp.StatusCode)
 				}
+
 			}
 		}
+		go queueBackend(be)
+
 	}
 }
