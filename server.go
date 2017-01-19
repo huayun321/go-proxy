@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -100,25 +101,52 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 
-		be, err := getBackend()
-		if err != nil {
-			return
+		//		hostname := strings.Join(req.URL.Query()["hostname"], "")
+
+		log.Printf("req.URL.Host: %s", req.Host)
+		//		log.Printf("req: %s", req)
+		//		log.Printf(req.Host)
+
+		hostPortURL := req.URL
+		var address string
+
+		if hostPortURL.Opaque == "443" { //https访问
+			address = hostPortURL.Scheme + ":443"
+		} else { //http访问
+			if strings.Index(hostPortURL.Host, ":") == -1 { //host不带端口， 默认80
+				address = hostPortURL.Host + ":80"
+			} else {
+				address = hostPortURL.Host
+			}
 		}
 
-		if err := req.Write(be.Writer); err == nil {
-			be.Writer.Flush()
+		//		if len(hostname) == 0 {
+		//			hostname = "baidu.com:80"
+		//		} else {
+		//			hostname += ":80"
+		//		}
+
+		be, err := net.Dial("tcp", address)
+		if err != nil {
+			log.Printf("Failed to connect to the web site: %s, err: %s", address, err)
+			return
+		}
+		be_reader := bufio.NewReader(be)
+
+		if err := req.Write(be); err == nil {
 			//6. Read the response from the backend
-			if resp, err := http.ReadResponse(be.Reader, req); err == nil {
+			if resp, err := http.ReadResponse(be_reader, req); err == nil {
 				bytes := updateStats(req, resp)
 				resp.Header.Set("X-Bytes", strconv.FormatInt(bytes, 10))
+				//				log.Printf("req: %s", resp)
 
 				if err := resp.Write(conn); err == nil {
+					//					log.Printf("req: %s", resp)
 					log.Printf("%s: %d", req.URL.Path, resp.StatusCode)
 				}
 
 			}
 		}
-		go queueBackend(be)
 
 	}
 }
